@@ -1,0 +1,18 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime experiment state
+data/
+
+# Local editor / agent indexing state
+.codegraph/
+.cursor/
+.agents/
+.codex/
+
+# Local secrets
+.env
