@@ -11,13 +11,16 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from .agent import DemoAgent
+from .agent import AutonomousAgent, DemoAgent
+from .causal import replay_memory_effect
 from .environment import DemoProjectEnvironment
 from .events import EventStore
 from .memory import GovernedMemory, NaiveMemory, NoneMemory
 from .memory.base import MemorySystem
 from .memory.store import MemoryStore
+from .memory.manager import MemoryManager
 from .metrics import MetricsCollector
+from .model_client import DeepSeekModelClient, RuleBasedModelClient
 from .scenarios import build_learning_task, inject_unsafe_memory
 
 app = typer.Typer(help="Deterministic Agent Memory experiment lab.", no_args_is_help=True)
@@ -89,6 +92,7 @@ def reset() -> None:
 def run(
     scenario: Annotated[str, typer.Argument(help="learn-1, learn-2, or injection")],
     mode: Annotated[str, typer.Option(help="none, naive, or governed")] = "governed",
+    planner: Annotated[str, typer.Option(help="deepseek, autonomous (offline), or scripted")] = "autonomous",
 ) -> None:
     """Run one fresh-session scenario and retain only the selected memory policy's state."""
     try:
@@ -97,7 +101,14 @@ def run(
         raise typer.BadParameter(str(error)) from error
     memory_store = store()
     memory = memory_system(mode, memory_store)
-    agent = DemoAgent(DemoProjectEnvironment(), event_store())
+    if planner == "deepseek":
+        agent = AutonomousAgent(DemoProjectEnvironment(), event_store(), DeepSeekModelClient())
+    elif planner == "autonomous":
+        agent = AutonomousAgent(DemoProjectEnvironment(), event_store(), RuleBasedModelClient())
+    elif planner == "scripted":
+        agent = DemoAgent(DemoProjectEnvironment(), event_store())
+    else:
+        raise typer.BadParameter("planner must be deepseek, autonomous, or scripted")
     result = agent.run_task(task, memory, scenario)
     metrics().append(result)
 
@@ -105,6 +116,7 @@ def run(
     summary.add_column("Metric")
     summary.add_column("Value")
     summary.add_row("Session", result.session_id)
+    summary.add_row("Planner", result.planner)
     summary.add_row("Success", "YES" if result.success else "NO")
     summary.add_row("Tool calls", str(result.tool_calls))
     summary.add_row("Failed tool calls", str(result.failed_tool_calls))
@@ -157,6 +169,25 @@ def report() -> None:
     console.print(table)
 
 
+@app.command()
+def blame(
+    scenario: Annotated[str, typer.Argument(help="Scenario to replay")] = "learn-2",
+    memory: Annotated[str | None, typer.Option(help="Replay exactly this memory version")] = None,
+    baseline: Annotated[str | None, typer.Option(help="Compare against this memory version instead of no memory")] = None,
+) -> None:
+    """Replay a task without admitted memory and attribute the outcome delta."""
+    task = build_learning_task(scenario)
+    try:
+        rows = replay_memory_effect(task, scenario, store(), data_dir() / "replay-events.jsonl", memory, baseline)
+    except KeyError as error:
+        raise typer.BadParameter(f"Unknown memory id: {error.args[0]}") from error
+    if not rows:
+        console.print("No admitted memory to attribute.")
+        return
+    for row in rows:
+        console.print(Panel(row.model_dump_json(indent=2), title=f"Blame: {row.memory_id}"))
+
+
 @memory_app.command("list")
 def list_memory() -> None:
     """List structured cards; raw NaiveMemory records are intentionally not cards."""
@@ -165,7 +196,7 @@ def list_memory() -> None:
         console.print("No structured memory cards stored.")
         return
     table = Table(title="Structured Memory Cards")
-    for column in ("ID", "TYPE", "PROJECT", "TRUST", "RISK", "STATUS", "USES"):
+    for column in ("ID", "TYPE", "PROJECT", "TRUST", "RISK", "STATUS", "RELEASE", "VERSION", "USES"):
         table.add_column(column)
     for card in cards:
         table.add_row(
@@ -175,6 +206,8 @@ def list_memory() -> None:
             card.trust_level,
             card.risk_level,
             card.status,
+            card.release_status,
+            str(card.version),
             str(card.use_count),
         )
     console.print(table)
@@ -187,6 +220,48 @@ def show_memory(memory_id: str) -> None:
     if card is None:
         raise typer.BadParameter(f"Unknown memory id: {memory_id}")
     console.print(Panel(card.model_dump_json(indent=2), title=f"Memory Card: {memory_id}"))
+
+
+@memory_app.command("consolidate")
+def consolidate(memory_id: str, variant: str = "overgeneralized") -> None:
+    """Create and activate a versioned consolidation (the demo variant intentionally regresses)."""
+    try:
+        card = MemoryManager(store()).consolidate(memory_id, variant)
+    except (KeyError, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
+    console.print(Panel(card.model_dump_json(indent=2), title=f"Consolidated: {card.memory_id}"))
+
+
+@memory_app.command("diff")
+def memory_diff(old_id: str, new_id: str) -> None:
+    """Show the semantic diff between two behavior-patch versions."""
+    try:
+        rendered = MemoryManager(store()).diff(old_id, new_id)
+    except KeyError as error:
+        raise typer.BadParameter(f"Unknown memory id: {error.args[0]}") from error
+    console.print(Panel(rendered or "No semantic change", title=f"Memory Diff: {old_id} -> {new_id}"))
+
+
+@memory_app.command("rollback")
+def rollback_memory(memory_id: str) -> None:
+    """Revoke one version and reactivate the version it superseded."""
+    try:
+        restored = MemoryManager(store()).rollback(memory_id)
+    except KeyError as error:
+        raise typer.BadParameter(f"Unknown memory id: {error.args[0]}") from error
+    console.print(f"[green]Rolled back {memory_id}; active memory is {restored.memory_id} v{restored.version}.[/green]")
+
+
+@memory_app.command("releases")
+def releases() -> None:
+    """Display version lineage and release status for every memory card."""
+    cards = store().list_cards()
+    table = Table(title="Memory Release Status")
+    for column in ("ID", "VERSION", "SUPERSEDES", "CONTENT STATUS", "RELEASE"):
+        table.add_column(column)
+    for card in cards:
+        table.add_row(card.memory_id, str(card.version), card.supersedes or "-", card.status, card.release_status)
+    console.print(table)
 
 
 @memory_app.command("explain")

@@ -9,6 +9,7 @@ from .environment.demo_project import DemoProjectEnvironment
 from .events import EventStore
 from .memory.base import MemorySystem
 from .memory.embeddings import estimate_tokens
+from .model_client import ModelClient
 from .schemas import Action, RunResult, TaskContext, ToolResult, TrajectoryStep
 
 
@@ -127,3 +128,36 @@ class DemoAgent:
             if module in task.task_text.lower():
                 return module
         return "payments"
+
+
+class AutonomousAgent(DemoAgent):
+    """Tool-using loop whose next action is always selected by a model client."""
+
+    def __init__(self, environment, event_store, model: ModelClient, max_steps: int = 8) -> None:
+        super().__init__(environment, event_store)
+        self.model = model
+        self.max_steps = max_steps
+        self.planner_name = "deepseek" if model.__class__.__name__ == "DeepSeekModelClient" else "autonomous"
+
+    def run_task(self, task: TaskContext, memory: MemorySystem, scenario: str) -> RunResult:
+        started = perf_counter()
+        trajectory_id = f"run-{uuid4().hex[:12]}"
+        retrieval = memory.query(task)
+        self.event_store.append_event(trajectory_id=trajectory_id, session_id=task.session_id,
+            producer="user", event_type="user_request", content={"task": task.task_text, "scenario": scenario})
+        trajectory: list[TrajectoryStep] = []
+        for _ in range(self.max_steps):
+            action = self.model.decide(task, self.environment.tool_schemas(), retrieval.cards,
+                                       retrieval.raw_contexts, trajectory)
+            result = self._execute(task, trajectory_id, trajectory, action)
+            if result.task_complete:
+                break
+        memory.observe(task, trajectory, trajectory_id)
+        errors = [step.result.error for step in trajectory if step.result.error]
+        memory_text = "\n".join([card.content for card in retrieval.cards] + retrieval.raw_contexts)
+        return RunResult(trajectory_id=trajectory_id, session_id=task.session_id, scenario=scenario,
+            mode=memory.mode, success=any(step.result.task_complete for step in trajectory),
+            tool_calls=len(trajectory), failed_tool_calls=sum(not step.result.ok for step in trajectory),
+            estimated_memory_tokens=estimate_tokens(memory_text), elapsed_ms=round((perf_counter()-started)*1000, 2),
+            errors=[e for e in errors if e], admitted_memory_ids=[c.memory_id for c in retrieval.cards],
+            decisions=retrieval.decisions, trajectory=trajectory, planner=self.planner_name)

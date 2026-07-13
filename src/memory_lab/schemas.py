@@ -52,6 +52,9 @@ class MemoryCard(BaseModel):
     problem_signature: list[str] = Field(default_factory=list)
     procedure: list[str] = Field(default_factory=list)
     expected_outcome: str | None = None
+    preconditions: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    permissions_required: list[str] = Field(default_factory=list)
 
     user_id: str | None = None
     project_id: str | None = None
@@ -66,6 +69,9 @@ class MemoryCard(BaseModel):
     valid_from: datetime = Field(default_factory=utc_now)
     valid_to: datetime | None = None
     status: Literal["active", "superseded", "revoked"] = "active"
+    release_status: Literal["candidate", "tested", "canary", "active", "quarantined", "revoked"] = "active"
+    version: int = 1
+    supersedes: str | None = None
 
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -122,3 +128,14 @@ class RunResult(BaseModel):
     admitted_memory_ids: list[str] = Field(default_factory=list)
     decisions: list[AdmissionDecision] = Field(default_factory=list)
     trajectory: list[TrajectoryStep] = Field(default_factory=list)
+    planner: Literal["scripted", "autonomous", "deepseek"] = "scripted"
+
+
+class CausalAttribution(BaseModel):
+    memory_id: str
+    observed_success: bool
+    counterfactual_success: bool
+    observed_failures: int
+    counterfactual_failures: int
+    harmful_contribution: float
+    helpful_contribution: float

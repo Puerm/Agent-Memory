@@ -31,6 +31,8 @@ class GovernedMemory(MemorySystem):
             reasons: list[str] = []
             if card.status != "active":
                 reasons.append("INACTIVE")
+            if card.release_status not in {"canary", "active"}:
+                reasons.append("NOT_RELEASED")
             if card.valid_from > now or (card.valid_to is not None and now >= card.valid_to):
                 reasons.append("EXPIRED")
             if card.project_id is not None and card.project_id != task.project_id:

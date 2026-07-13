@@ -1,0 +1,2 @@
+[console_scripts]
+memory-lab = memory_lab.cli:main
